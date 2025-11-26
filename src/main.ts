@@ -198,7 +198,7 @@ function splitMeasurements(measurements: AirQualityMeasurement[]) {
 }
 
 function buildFilterAdvice(measurements: AirQualityMeasurement[]): FilterAdvice {
-  const { dust, gases } = splitMeasurements(measurements)
+  const { gases } = splitMeasurements(measurements)
 
   const find = (names: string[]) =>
     measurements.find((m) => names.includes(m.parameter.toLowerCase()))
