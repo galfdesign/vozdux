@@ -75,7 +75,7 @@ appEl.innerHTML = `
       </a>
       <div class="header-title">Качество воздуха</div>
       <div class="header-subtitle">
-        Нажмите по точке на карте, чтобы получить данные о загрязнении воздуха (online).
+        Нажмите по точке на карте.
       </div>
     </header>
     <main class="layout">
@@ -181,6 +181,15 @@ function getNormFor(parameter: string): NormInfo | null {
   return null
 }
 
+// Приближённое преобразование концентрации CO из µg/m³ в ppm
+// Предполагаем 25 °C и 1 атм (24.45 л/моль).
+// 1 ppm ≈ (мг/м³ * 24.45) / M, где M — молярная масса газа.
+// Для CO M ≈ 28.01 г/моль.
+function convertCOUgPerM3ToPpm(valueUgPerM3: number): number {
+  const mgPerM3 = valueUgPerM3 / 1000
+  return (mgPerM3 * 24.45) / 28.01
+}
+
 function splitMeasurements(measurements: AirQualityMeasurement[]) {
   const dust: AirQualityMeasurement[] = []
   const gases: AirQualityMeasurement[] = []
@@ -253,17 +262,35 @@ function getPollutionLevel(measurements: AirQualityMeasurement[]): PollutionLeve
   if (!base) return null
 
   const value = base.value
+  const norm = getNormFor(base.parameter)
 
-  if (value <= 15) {
-    return { id: 'good', label: 'Низкий уровень загрязнения', color: '#22c55e' }
+  // Если по каким-то причинам нормы нет, используем мягкие абсолютные пороги как fallback
+  if (!norm) {
+    if (value <= 15) {
+      return { id: 'good', label: 'Низкий уровень загрязнения', color: '#22c55e' }
+    }
+    if (value <= 35) {
+      return { id: 'moderate', label: 'Умеренное загрязнение', color: '#eab308' }
+    }
+    if (value <= 55) {
+      return { id: 'unhealthy', label: 'Повышенное загрязнение', color: '#f97316' }
+    }
+    return { id: 'very-unhealthy', label: 'Очень высокое загрязнение', color: '#ef4444' }
   }
-  if (value <= 35) {
-    return { id: 'moderate', label: 'Умеренное загрязнение', color: '#eab308' }
+
+  // Оцениваем состояние относительно принятой нормы (ratio = текущее / норматив)
+  const ratio = value / norm.limit
+
+  if (ratio <= 0.5) {
+    return { id: 'good', label: 'Низкий уровень загрязнения (≤ 50% от нормы)', color: '#22c55e' }
   }
-  if (value <= 55) {
-    return { id: 'unhealthy', label: 'Повышенное загрязнение', color: '#f97316' }
+  if (ratio <= 1) {
+    return { id: 'moderate', label: 'Умеренное загрязнение (в пределах нормы)', color: '#eab308' }
   }
-  return { id: 'very-unhealthy', label: 'Очень высокое загрязнение', color: '#ef4444' }
+  if (ratio <= 1.5) {
+    return { id: 'unhealthy', label: 'Повышенное загрязнение (выше нормы)', color: '#f97316' }
+  }
+  return { id: 'very-unhealthy', label: 'Очень высокое загрязнение (значительно выше нормы)', color: '#ef4444' }
 }
 
 function renderData(
@@ -294,34 +321,6 @@ function renderData(
 
   const place = placeParts.join(', ') || 'Точка на карте'
 
-  const { dust, gases } = splitMeasurements(measurements)
-
-  const renderMetricRow = (m: AirQualityMeasurement): string => {
-    const norm = getNormFor(m.parameter)
-    const over = norm ? m.value > norm.limit : false
-
-    const rowClass = over ? 'metric-row metric-row--alert' : 'metric-row'
-    const badge =
-      norm != null
-        ? over
-          ? `<div class="metric-badge">выше нормы · ${norm.limit.toFixed(0)} ${norm.unit}</div>`
-          : `<div class="metric-badge metric-badge--norm">норма ~ ${norm.limit.toFixed(0)} ${norm.unit}</div>`
-        : `<div class="metric-badge metric-badge--spacer"></div>`
-
-    return `
-      <div class="${rowClass}">
-        <div class="metric-name">${formatParameterName(m.parameter)}</div>
-        <div class="metric-value">
-          ${m.value.toFixed(1)} <span class="metric-unit">${m.unit}</span>
-        </div>
-        ${badge}
-      </div>
-    `
-  }
-
-  const dustHtml = dust.map(renderMetricRow).join('')
-  const gasesHtml = gases.map(renderMetricRow).join('')
-
   // Для рекомендаций по фильтрации используем худший сценарий:
   // если есть экстремальные значения за 30 дней — опираемся на них, иначе на текущий замер.
   const filterAdviceSource = extremes && extremes.length ? extremes : measurements
@@ -335,6 +334,12 @@ function renderData(
               const norm = getNormFor(m.parameter)
               const over = norm ? m.value > norm.limit : false
 
+              const key = m.parameter.toLowerCase()
+              const isCO = key === 'carbon_monoxide' || key === 'co'
+
+              const displayValue = isCO ? convertCOUgPerM3ToPpm(m.value) : m.value
+              const displayUnit = isCO ? 'ppm' : m.unit
+
               const rowClass = over ? 'extremes-row extremes-row--alert' : 'extremes-row'
               const badge =
                 norm != null
@@ -347,7 +352,14 @@ function renderData(
         <div class="${rowClass}">
           <div class="extremes-name">${formatParameterName(m.parameter)}</div>
           <div class="extremes-value">
-            ${m.value.toFixed(1)} <span class="extremes-unit">${m.unit}</span>
+            ${displayValue.toFixed(isCO ? 3 : 1)} <span class="extremes-unit">${displayUnit}</span>
+            ${
+              isCO
+                ? `<span class="extremes-unit"> (~${m.value.toFixed(
+                    0,
+                  )} µg/m³)</span>`
+                : ''
+            }
           </div>
           ${badge}
         </div>
@@ -387,17 +399,6 @@ function renderData(
           ? `<div class="filter-advice-text filter-advice-text--secondary">${filterAdvice.gases}</div>`
           : ''
       }
-    </div>
-    <div class="metrics">
-      <div class="metrics-caption">Текущие значения качества воздуха (режим реального времени, ближайший час)</div>
-      <div class="metrics-group">
-        <div class="metrics-group-title">Частицы (пыль)</div>
-        ${dustHtml || '<div class="metric-row metric-row--muted">Нет данных по твёрдым частицам</div>'}
-      </div>
-      <div class="metrics-group">
-        <div class="metrics-group-title">Газы</div>
-        ${gasesHtml || '<div class="metric-row metric-row--muted">Нет данных по газообразным загрязнителям</div>'}
-      </div>
     </div>
     ${extremesHtml}
     <div class="info-footnote">
@@ -600,18 +601,20 @@ async function fetchFromOpenWeather(lat: number, lng: number): Promise<AirQualit
   const first = data.list[0]
   const components = first.components || {}
 
-  const mapping: { key: string; label: string }[] = [
-    { key: 'pm2_5', label: 'PM2.5' },
-    { key: 'pm10', label: 'PM10' },
-    { key: 'no2', label: 'NO2' },
-    { key: 'so2', label: 'SO2' },
-    { key: 'o3', label: 'O3' },
-    { key: 'co', label: 'CO' },
+  // Используем канонические имена параметров (как в Open-Meteo и в NORMS),
+  // а человекочитаемые подписи формируем через formatParameterName.
+  const mapping: { key: string; canonical: string }[] = [
+    { key: 'pm2_5', canonical: 'pm2_5' },
+    { key: 'pm10', canonical: 'pm10' },
+    { key: 'no2', canonical: 'no2' },
+    { key: 'so2', canonical: 'so2' },
+    { key: 'o3', canonical: 'o3' },
+    { key: 'co', canonical: 'co' },
   ]
 
   const measurements: AirQualityMeasurement[] = []
 
-  for (const { key, label } of mapping) {
+  for (const { key, canonical } of mapping) {
     const raw = components[key]
     if (raw == null) continue
 
@@ -619,7 +622,7 @@ async function fetchFromOpenWeather(lat: number, lng: number): Promise<AirQualit
     if (Number.isNaN(value)) continue
 
     measurements.push({
-      parameter: label,
+      parameter: canonical,
       value,
       unit: 'µg/m³',
     })
